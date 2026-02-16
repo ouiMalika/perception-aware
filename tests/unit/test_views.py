@@ -1,5 +1,6 @@
 """Unit tests for Django API views."""
 
+import io
 import os
 import sys
 from pathlib import Path
@@ -26,6 +27,7 @@ django.setup()
 
 import pytest
 from django.contrib.auth.models import User
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import RequestFactory
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APIRequestFactory, force_authenticate
@@ -35,6 +37,7 @@ from sign_detection.views import (
     LoginView,
     RegisterView,
     TaxonomyView,
+    VideoDetectView,
 )
 
 
@@ -140,6 +143,7 @@ class TestDetectView:
         response = view(request)
         assert response.status_code == 202
         assert response.data["job_id"] == "fake-task-id-123"
+        assert response.data["job_type"] == "image"
 
     def test_detect_requires_auth(self, api_factory):
         request = api_factory.post("/api/detect/", {
@@ -156,5 +160,73 @@ class TestDetectView:
         }, format="json")
         force_authenticate(request, user=user)
         view = DetectView.as_view()
+        response = view(request)
+        assert response.status_code == 400
+
+
+@pytest.mark.django_db
+class TestVideoDetectView:
+
+    @patch("sign_detection.views.current_app")
+    def test_submit_video_job(self, mock_celery, api_factory, user, tmp_path):
+        mock_task = MagicMock()
+        mock_task.id = "fake-video-task-456"
+        mock_celery.send_task.return_value = mock_task
+
+        video_content = b"\x00" * 1024  # Dummy video bytes
+        video_file = SimpleUploadedFile(
+            "test_video.mp4",
+            video_content,
+            content_type="video/mp4",
+        )
+
+        request = api_factory.post(
+            "/api/detect/video/",
+            {"video": video_file, "interval_s": 1.0},
+            format="multipart",
+        )
+        force_authenticate(request, user=user)
+
+        view = VideoDetectView.as_view()
+        response = view(request)
+        assert response.status_code == 202
+        assert response.data["job_id"] == "fake-video-task-456"
+        assert response.data["job_type"] == "video"
+
+    def test_video_detect_requires_auth(self, api_factory):
+        video_file = SimpleUploadedFile(
+            "test.mp4", b"\x00" * 100, content_type="video/mp4",
+        )
+        request = api_factory.post(
+            "/api/detect/video/",
+            {"video": video_file},
+            format="multipart",
+        )
+        view = VideoDetectView.as_view()
+        response = view(request)
+        assert response.status_code in (401, 403)
+
+    def test_rejects_invalid_extension(self, api_factory, user):
+        bad_file = SimpleUploadedFile(
+            "test.txt", b"not a video", content_type="text/plain",
+        )
+        request = api_factory.post(
+            "/api/detect/video/",
+            {"video": bad_file},
+            format="multipart",
+        )
+        force_authenticate(request, user=user)
+        view = VideoDetectView.as_view()
+        response = view(request)
+        assert response.status_code == 400
+
+    def test_rejects_missing_video(self, api_factory, user):
+        request = api_factory.post(
+            "/api/detect/video/",
+            {},
+            format="multipart",
+        )
+        force_authenticate(request, user=user)
+        view = VideoDetectView.as_view()
         response = view(request)
         assert response.status_code == 400

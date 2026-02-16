@@ -144,3 +144,72 @@ def detect_signs_local(self, image_path: str, options: dict | None = None):
         "status": "completed",
         "result": result_dict,
     }
+
+
+# ---------------------------------------------------------------------------
+# Video tasks
+# ---------------------------------------------------------------------------
+
+
+@app.task(bind=True, name="detect_signs_video")
+def detect_signs_video(self, video_path: str, options: dict | None = None):
+    """
+    Process a video file through the sign detection pipeline.
+
+    Extracts frames at a configurable interval, runs YOLOv8 + CLIP on each,
+    and deduplicates detections across frames via IoU-based tracking.
+
+    Args:
+        video_path: Path to the video file on the worker filesystem.
+        options: Optional dict with keys:
+            - yolo_conf: float (default 0.25)
+            - clip_conf: float (default 0.15)
+            - interval_s: float, seconds between frames (default 0.5)
+            - max_frames: int, max frames to sample (default 300)
+            - iou_threshold: float, dedup IoU threshold (default 0.3)
+
+    Returns:
+        dict with tracked signs and per-frame detections.
+    """
+    from video_processor import detect_signs_in_video
+
+    options = options or {}
+
+    # Separate video-specific options from detection options
+    interval_s = options.pop("interval_s", 0.5)
+    max_frames = options.pop("max_frames", 300)
+    iou_threshold = options.pop("iou_threshold", 0.3)
+
+    def progress_callback(current, total, message):
+        self.update_state(
+            state="PROGRESS",
+            meta={
+                "current": current,
+                "total": total,
+                "status": message,
+            },
+        )
+
+    self.update_state(
+        state="PROGRESS",
+        meta={"status": f"Starting video processing: {video_path}"},
+    )
+
+    start = time.time()
+    result = detect_signs_in_video(
+        video_path=video_path,
+        interval_s=interval_s,
+        max_frames=max_frames,
+        iou_threshold=iou_threshold,
+        progress_callback=progress_callback,
+        **options,
+    )
+    elapsed = time.time() - start
+
+    result_dict = result.to_dict()
+    result_dict["processing_time_s"] = round(elapsed, 2)
+
+    return {
+        "status": "completed",
+        "result": result_dict,
+    }

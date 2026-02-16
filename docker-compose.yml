@@ -40,6 +40,8 @@ services:
       POSTGRES_PORT: "5432"
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
+    volumes:
+      - media_data:/app/media
     depends_on:
       postgres:
         condition: service_healthy
@@ -63,6 +65,7 @@ services:
         condition: service_healthy
     volumes:
       - model_cache:/root/.cache
+      - media_data:/app/media
     deploy:
       resources:
         reservations:
@@ -86,9 +89,11 @@ services:
         condition: service_healthy
     volumes:
       - model_cache:/root/.cache
+      - media_data:/app/media
     profiles:
       - cpu
 
 volumes:
   postgres_data:
   model_cache:
+  media_data:

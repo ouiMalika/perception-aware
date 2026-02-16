@@ -3,6 +3,7 @@ API views for the traffic sign detection service.
 
 Endpoints:
   POST /api/detect/         - Submit images for detection (returns job ID)
+  POST /api/detect/video/   - Upload a video for detection (returns job ID)
   GET  /api/jobs/<job_id>/  - Poll job status / retrieve results
   GET  /api/jobs/           - List all jobs for the authenticated user
   GET  /api/signs/          - List all detected signs (filterable by category)
@@ -18,15 +19,18 @@ from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from rest_framework import generics, permissions, status
 from rest_framework.authtoken.models import Token
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import DetectedSign, DetectionJob
+from .models import DetectedSign, DetectionJob, TrackedSign
 from .serializers import (
     DetectedSignSerializer,
     DetectionJobSerializer,
     DetectionRequestSerializer,
     JobStatusSerializer,
+    TrackedSignSerializer,
+    VideoDetectionRequestSerializer,
 )
 
 # ---------------------------------------------------------------------------
@@ -129,6 +133,7 @@ class DetectView(APIView):
         job = DetectionJob.objects.create(
             job_id=task.id,
             owner=request.user,
+            job_type="image",
             image_urls=image_urls,
             status="pending",
         )
@@ -137,8 +142,64 @@ class DetectView(APIView):
             {
                 "job_id": task.id,
                 "status": "pending",
+                "job_type": "image",
                 "num_images": len(image_urls),
                 "message": "Detection job submitted. Poll /api/jobs/<job_id>/ for results.",
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+
+class VideoDetectView(APIView):
+    """Upload a video file for asynchronous sign detection."""
+
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        serializer = VideoDetectionRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        video_file = serializer.validated_data["video"]
+        options = {
+            "yolo_conf": serializer.validated_data.get("yolo_conf", 0.25),
+            "clip_conf": serializer.validated_data.get("clip_conf", 0.15),
+            "interval_s": serializer.validated_data.get("interval_s", 0.5),
+            "max_frames": serializer.validated_data.get("max_frames", 300),
+        }
+
+        # Create job first to get the file saved via Django's FileField
+        # We use a placeholder job_id, then update after dispatching
+        job = DetectionJob(
+            job_id="pending",
+            owner=request.user,
+            job_type="video",
+            status="pending",
+        )
+        job.video_file = video_file
+        job.save()
+
+        # Dispatch to Celery with the saved file path
+        from celery import current_app
+        task = current_app.send_task(
+            "detect_signs_video",
+            args=[job.video_file.path, options],
+        )
+
+        # Update job with real task ID
+        job.job_id = task.id
+        job.save(update_fields=["job_id"])
+
+        return Response(
+            {
+                "job_id": task.id,
+                "status": "pending",
+                "job_type": "video",
+                "video_filename": video_file.name,
+                "options": {
+                    "interval_s": options["interval_s"],
+                    "max_frames": options["max_frames"],
+                },
+                "message": "Video detection job submitted. Poll /api/jobs/<job_id>/ for results.",
             },
             status=status.HTTP_202_ACCEPTED,
         )
@@ -167,7 +228,10 @@ class JobStatusView(APIView):
                 job.status = "completed"
                 job.result = result.result
                 job.save(update_fields=["status", "result"])
-                _persist_detections(job)
+                if job.job_type == "video":
+                    _persist_tracked_signs(job)
+                else:
+                    _persist_detections(job)
             elif result.state == "FAILURE":
                 job.status = "failed"
                 job.error_message = str(result.result)
@@ -207,6 +271,36 @@ class DetectedSignListView(generics.ListAPIView):
         min_conf = self.request.query_params.get("min_confidence")
         if min_conf:
             qs = qs.filter(confidence__gte=float(min_conf))
+
+        return qs
+
+
+class TrackedSignListView(generics.ListAPIView):
+    """
+    List tracked signs from video detection jobs.
+
+    Query params:
+        - category: filter by sign category
+        - min_confidence: minimum best confidence
+        - job_id: filter by specific job
+    """
+
+    serializer_class = TrackedSignSerializer
+
+    def get_queryset(self):
+        qs = TrackedSign.objects.filter(job__owner=self.request.user)
+
+        category = self.request.query_params.get("category")
+        if category:
+            qs = qs.filter(category=category)
+
+        min_conf = self.request.query_params.get("min_confidence")
+        if min_conf:
+            qs = qs.filter(best_confidence__gte=float(min_conf))
+
+        job_id = self.request.query_params.get("job_id")
+        if job_id:
+            qs = qs.filter(job__job_id=job_id)
 
         return qs
 
@@ -269,7 +363,7 @@ class LoginView(APIView):
 
 
 def _persist_detections(job: DetectionJob):
-    """Extract individual sign detections from job results and save to DB."""
+    """Extract individual sign detections from image job results and save to DB."""
     if not job.result or "results" not in job.result:
         return
 
@@ -294,3 +388,36 @@ def _persist_detections(job: DetectionJob):
 
     if signs:
         DetectedSign.objects.bulk_create(signs)
+
+
+def _persist_tracked_signs(job: DetectionJob):
+    """Extract tracked signs from video job results and save to DB."""
+    if not job.result:
+        return
+
+    result = job.result.get("result", job.result)
+    tracked_list = result.get("tracked_signs", [])
+
+    signs = []
+    for ts in tracked_list:
+        bbox = ts.get("best_bbox", {})
+        signs.append(TrackedSign(
+            job=job,
+            sign_id=ts.get("sign_id", 0),
+            category=ts.get("category", "unknown"),
+            description=ts.get("description", ""),
+            best_confidence=ts.get("best_confidence", 0),
+            bbox_x1=bbox.get("x1", 0),
+            bbox_y1=bbox.get("y1", 0),
+            bbox_x2=bbox.get("x2", 0),
+            bbox_y2=bbox.get("y2", 0),
+            first_seen_s=ts.get("first_seen_s", 0),
+            last_seen_s=ts.get("last_seen_s", 0),
+            first_frame=ts.get("first_frame", 0),
+            last_frame=ts.get("last_frame", 0),
+            frame_count=ts.get("frame_count", 0),
+            top_scores=ts.get("top_scores", {}),
+        ))
+
+    if signs:
+        TrackedSign.objects.bulk_create(signs)
