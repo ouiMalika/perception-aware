@@ -8,6 +8,7 @@ same sign across consecutive frames using IoU-based tracking.
 
 import logging
 import os
+import subprocess
 import tempfile
 from dataclasses import dataclass, field
 
@@ -444,4 +445,24 @@ def generate_annotated_video(
     cap.release()
     writer.release()
     logger.info("Annotated video saved to %s (%d frames)", output_path, frame_num)
+
+    # Re-encode to H.264 for browser compatibility (mp4v is not web-playable)
+    h264_path = output_path.replace(".mp4", "_h264.mp4")
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", output_path,
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                "-movflags", "+faststart",
+                "-an",  # no audio track needed
+                h264_path,
+            ],
+            check=True,
+            capture_output=True,
+        )
+        os.replace(h264_path, output_path)
+        logger.info("Re-encoded to H.264: %s", output_path)
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        logger.warning("H.264 re-encode failed (falling back to mp4v): %s", exc)
+
     return output_path
