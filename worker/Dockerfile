@@ -22,4 +22,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD ["celery", "-A", "tasks", "worker", "--loglevel=info", "--concurrency=1"]
+CMD ["celery", "-A", "tasks", "worker", "--loglevel=info", "--pool=solo"]

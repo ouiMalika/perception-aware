@@ -10,7 +10,12 @@ Mirrors the VisionBoard-AI worker architecture:
 import json
 import logging
 import os
+import sys
 import time
+
+# Ensure /app is always importable (guards against Celery pool path issues)
+if "/app" not in sys.path:
+    sys.path.insert(0, "/app")
 
 from celery import Celery
 
