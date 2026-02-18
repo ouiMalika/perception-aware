@@ -56,8 +56,9 @@ lisa_ssd/
 ├── data_prep.py     Anchor-box matching and label encoding
 ├── train.py         TF2 training loop with checkpointing
 ├── inference.py     Image / video / demo inference modes
-├── utils.py         IoU, NMS, visualisation helpers
-└── requirements.txt Python dependencies
+├── utils.py              IoU, NMS, visualisation helpers
+├── create_sample_data.py Synthetic LISA-format dataset generator (no download needed)
+└── requirements.txt      Python dependencies
 ```
 
 ---
@@ -80,17 +81,31 @@ pip install opencv-python numpy
 pip install -r lisa_ssd/requirements.txt
 ```
 
-### 2. Download the LISA dataset
+### 2. Get a dataset
 
-The full LISA Traffic Sign Dataset (~7.7 GB) requires a free academic
-registration at:
+#### Option A — Synthetic data (fastest, no download)
+
+`create_sample_data.py` generates a small synthetic dataset in the exact
+LISA directory format.  Use this to verify the full pipeline works before
+committing to the real download.
+
+```bash
+python lisa_ssd/create_sample_data.py --out ./data/lisa   # 8 classes × 40 images
+# optionally generate more classes or images:
+# python lisa_ssd/create_sample_data.py --n 100 --classes stop yield signalAhead
+```
+
+#### Option B — Real LISA dataset
+
+The full LISA Traffic Sign Dataset (~7.7 GB, 47 classes) requires a free
+academic registration:
 <http://cvrr-nas.ucsd.edu/LISA/lisa-traffic-sign-dataset.html>
 
-A **smaller "Tiny LISA"** subset (~200 MB, no registration) is available on
-Kaggle and is sufficient for quick experiments:
-<https://www.kaggle.com/datasets/mmontiel/tiny-lisa-traffic-sign-detection-dataset>
+> **Note:** Third-party "Tiny LISA" repacks on Kaggle dump all images into
+> a flat folder without per-class subdirectories and are **not** compatible
+> with this loader.  Use the official release or the synthetic generator above.
 
-After downloading, extract so the layout looks like:
+After extracting the official dataset the layout must look like:
 
 ```
 data/
@@ -110,9 +125,8 @@ data/
     └── ... (one directory per sign class)
 ```
 
-> **Tip:** You don't need all 47 classes to start.  The dataset loader
-> silently skips missing class directories, so you can begin with just the
-> classes you have downloaded.
+> **Tip:** The dataset loader silently skips missing class directories, so
+> you can start training on any partial subset of the 47 classes.
 
 ### 3. Preprocess
 
