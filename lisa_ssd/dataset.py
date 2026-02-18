@@ -264,6 +264,53 @@ def _resolve_image_path(rel_filename: str, lisa_root: Path, csv_dir: Path) -> Op
     return None
 
 
+# ---------------------------------------------------------------------------
+# Header-aware column detection
+# ---------------------------------------------------------------------------
+
+# Normalised header name → semantic field mappings.
+# Covers the official LISA format ("Annotation tag", "Upper left corner X" …)
+# and common flat-export formats ("class", "x1", "xmin" …).
+_HDR_FILENAME = {"filename", "file", "image", "image_path", "frame", "filepath", "path"}
+_HDR_CLASS    = {"class", "annotation tag", "label", "sign", "category", "tag",
+                 "sign_class", "classname", "class_name"}
+_HDR_X1       = {"x1", "xmin", "x_min", "left", "upper left corner x"}
+_HDR_Y1       = {"y1", "ymin", "y_min", "top",  "upper left corner y"}
+_HDR_X2       = {"x2", "xmax", "x_max", "right", "lower right corner x"}
+_HDR_Y2       = {"y2", "ymax", "y_max", "bottom", "lower right corner y"}
+
+# Default column order when no header is present (original LISA format)
+_DEFAULT_COLS = {"filename": 0, "class": 1, "x1": 2, "y1": 3, "x2": 4, "y2": 5}
+
+
+def _detect_columns(header_row: List[str]) -> dict:
+    """Map semantic fields to column indices from a CSV header row.
+
+    Supports both the official LISA semicolon format and flat CSV exports
+    where the column order may differ (e.g. filename,x1,y1,x2,y2,class).
+
+    Returns a dict like {"filename": 0, "class": 5, "x1": 1, ...}.
+    Falls back to _DEFAULT_COLS for any field not found in the header.
+    """
+    norm = [h.strip().lower() for h in header_row]
+    result = dict(_DEFAULT_COLS)  # start with defaults
+
+    for field, candidates in [
+        ("filename", _HDR_FILENAME),
+        ("class",    _HDR_CLASS),
+        ("x1",       _HDR_X1),
+        ("y1",       _HDR_Y1),
+        ("x2",       _HDR_X2),
+        ("y2",       _HDR_Y2),
+    ]:
+        for i, h in enumerate(norm):
+            if h in candidates:
+                result[field] = i
+                break
+
+    return result
+
+
 def load_merged_csv(
     merged_csv: str,
     lisa_dir: str = LISA_DIR,
@@ -271,10 +318,13 @@ def load_merged_csv(
 ) -> List[Annotation]:
     """Parse a merged annotations CSV (alternative to per-class dirs).
 
-    Handles the format used by the official LISA release and common repacks:
-      - Delimiter: semicolon, comma, or mixed (auto-detected and normalised)
-      - Image paths: resolved relative to lisa_dir, the CSV directory, or as
-        bare filenames in a flat folder (tries all strategies)
+    Handles both the official LISA format and flat CSV exports:
+      - Official LISA: Filename;Annotation tag;Upper left corner X;…
+      - Flat export:   filename,x1,y1,x2,y2,class   (any column order)
+      - Delimiter: semicolon, comma, or mixed (normalised automatically)
+      - Image paths: resolved via multiple strategies (see _resolve_image_path)
+
+    Column order is auto-detected from the header row.
 
     Args:
         merged_csv: path to the merged CSV file (e.g. annotations.csv).
@@ -300,14 +350,24 @@ def load_merged_csv(
     content = content.replace(";", ",")
 
     reader = csv.reader(StringIO(content))
-    next(reader, None)  # skip header row
+
+    # Read header and detect column layout
+    header = next(reader, None)
+    cols = _detect_columns(header) if header else dict(_DEFAULT_COLS)
+
+    if verbose:
+        print(f"  Column mapping: {cols}")
+
+    fi = cols["filename"]
+    ci = cols["class"]
+    x1i, y1i, x2i, y2i = cols["x1"], cols["y1"], cols["x2"], cols["y2"]
 
     for row in reader:
-        if len(row) < 6:
+        if len(row) <= max(fi, ci, x1i, y1i, x2i, y2i):
             continue
 
-        rel_filename = row[0].strip()
-        cls_name     = row[1].strip()
+        rel_filename = row[fi].strip()
+        cls_name     = row[ci].strip()
         class_idx    = CLASS_TO_IDX.get(cls_name)
 
         if class_idx is None:
@@ -315,10 +375,10 @@ def load_merged_csv(
             continue
 
         try:
-            x1 = int(float(row[2]))
-            y1 = int(float(row[3]))
-            x2 = int(float(row[4]))
-            y2 = int(float(row[5]))
+            x1 = int(float(row[x1i]))
+            y1 = int(float(row[y1i]))
+            x2 = int(float(row[x2i]))
+            y2 = int(float(row[y2i]))
         except (ValueError, IndexError):
             continue
 
