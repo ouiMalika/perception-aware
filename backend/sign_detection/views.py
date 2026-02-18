@@ -13,6 +13,7 @@ Endpoints:
 """
 
 import json
+import uuid
 
 from celery.result import AsyncResult
 from django.contrib.auth import authenticate
@@ -167,10 +168,11 @@ class VideoDetectView(APIView):
             "max_frames": serializer.validated_data.get("max_frames", 300),
         }
 
-        # Create job first to get the file saved via Django's FileField
-        # We use a placeholder job_id, then update after dispatching
+        # Create job first to get the file saved via Django's FileField.
+        # Use a temporary UUID as job_id, then replace with Celery task ID.
+        temp_id = f"video-{uuid.uuid4().hex[:16]}"
         job = DetectionJob(
-            job_id="pending",
+            job_id=temp_id,
             owner=request.user,
             job_type="video",
             status="pending",
@@ -185,7 +187,7 @@ class VideoDetectView(APIView):
             args=[job.video_file.path, options],
         )
 
-        # Update job with real task ID
+        # Update job with real Celery task ID
         job.job_id = task.id
         job.save(update_fields=["job_id"])
 
