@@ -243,7 +243,7 @@ class JobStatusView(APIView):
                             rel_path = annotated_path[len(media_root):].lstrip("/")
                         else:
                             rel_path = os.path.basename(annotated_path)
-                        job.output_video.name = rel_path
+                        job.output_video = rel_path
                         save_fields.append("output_video")
                 job.save(update_fields=save_fields)
                 if job.job_type == "video":
