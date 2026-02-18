@@ -66,16 +66,9 @@ services:
     volumes:
       - model_cache:/root/.cache
       - media_data:/app/media
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
 
-  # CPU-only worker variant (use instead of 'worker' if no GPU)
-  worker-cpu:
+  # GPU worker variant (use with: docker compose --profile gpu up)
+  worker-gpu:
     build: ./worker
     environment:
       CELERY_BROKER_URL: redis://redis:6379/0
@@ -91,7 +84,14 @@ services:
       - model_cache:/root/.cache
       - media_data:/app/media
     profiles:
-      - cpu
+      - gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
 volumes:
   postgres_data:
