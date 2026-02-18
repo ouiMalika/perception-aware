@@ -40,19 +40,59 @@ _yolo_model = None
 _model_class_names: list[str] = []
 
 
+def _download_weights(url: str) -> str:
+    """
+    Download weights from *url* to a local cache directory and return the
+    local file path.  Re-uses the cached file on subsequent calls.
+    """
+    cache_dir = Path(
+        os.environ.get("YOLOV7_WEIGHTS_CACHE_DIR", "/tmp/yolov7_weights")
+    )
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # Derive a sane filename from the URL (strip query-string)
+    raw_name = url.split("/")[-1].split("?")[0]
+    filename = raw_name if raw_name.endswith(".pt") else (raw_name or "weights") + ".pt"
+    local_path = cache_dir / filename
+
+    if local_path.exists():
+        logger.info("Using cached weights: %s", local_path)
+        return str(local_path)
+
+    logger.info("Downloading YOLOv7 weights from %s → %s", url, local_path)
+    resp = requests.get(url, stream=True, timeout=300)
+    resp.raise_for_status()
+
+    total = int(resp.headers.get("content-length", 0))
+    downloaded = 0
+    with open(local_path, "wb") as f:
+        for chunk in resp.iter_content(chunk_size=65536):
+            f.write(chunk)
+            downloaded += len(chunk)
+            if total:
+                logger.debug("Download progress: %.1f%%", downloaded / total * 100)
+
+    logger.info("Weights downloaded (%d bytes) → %s", downloaded, local_path)
+    return str(local_path)
+
+
 def _resolve_weights() -> str:
     """
-    Return the path (or URL) for the YOLOv7 weights file.
+    Return the local path for the YOLOv7 weights file.
 
     Priority:
       1. YOLOV7_WEIGHTS_PATH   – absolute path to a custom .pt file
-      2. YOLOV7_WEIGHTS_URL    – URL to download weights from
+      2. YOLOV7_WEIGHTS_URL    – URL to download weights from (cached locally)
       3. Default               – 'yolov7.pt' (auto-downloaded by torch.hub)
     """
     if p := os.environ.get("YOLOV7_WEIGHTS_PATH", "").strip():
         if not Path(p).exists():
             raise FileNotFoundError(f"YOLOV7_WEIGHTS_PATH not found: {p}")
         return p
+
+    if url := os.environ.get("YOLOV7_WEIGHTS_URL", "").strip():
+        return _download_weights(url)
+
     # Default: let torch.hub download official yolov7.pt on first run
     return "yolov7.pt"
 
