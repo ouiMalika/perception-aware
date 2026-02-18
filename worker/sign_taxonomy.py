@@ -288,6 +288,29 @@ SIGN_TAXONOMY = {
 }
 
 # ---------------------------------------------------------------------------
+# Negative prompts — these help CLIP reject non-sign objects.
+# Any crop where the best category is "not_a_sign" will be discarded.
+# ---------------------------------------------------------------------------
+NEGATIVE_PROMPTS = [
+    "a car on the road",
+    "a truck on the road",
+    "a bus on the road",
+    "a person walking",
+    "a pedestrian",
+    "a bicycle on the road",
+    "a motorcycle on the road",
+    "a building",
+    "a tree",
+    "a street lamp or utility pole",
+    "a traffic cone",
+    "a road barrier",
+    "the sky",
+    "the road surface",
+    "a vehicle license plate",
+    "a window or door",
+]
+
+# ---------------------------------------------------------------------------
 # Derived structures for pipeline use
 # ---------------------------------------------------------------------------
 
@@ -300,6 +323,11 @@ for category, info in SIGN_TAXONOMY.items():
     for prompt in info["prompts"]:
         PROMPT_TO_CATEGORY[prompt] = category
         ALL_PROMPTS.append(prompt)
+
+# Include negative prompts mapped to the "not_a_sign" pseudo-category
+for prompt in NEGATIVE_PROMPTS:
+    PROMPT_TO_CATEGORY[prompt] = "not_a_sign"
+    ALL_PROMPTS.append(prompt)
 
 # Priority lookup
 CATEGORY_PRIORITY = {cat: info["priority"] for cat, info in SIGN_TAXONOMY.items()}

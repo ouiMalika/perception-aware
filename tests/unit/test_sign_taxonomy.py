@@ -13,6 +13,7 @@ from sign_taxonomy import (
     ALL_PROMPTS,
     CATEGORY_DESCRIPTIONS,
     CATEGORY_PRIORITY,
+    NEGATIVE_PROMPTS,
     PROMPT_TO_CATEGORY,
     SIGN_TAXONOMY,
     get_categories_by_priority,
@@ -66,14 +67,20 @@ class TestPromptToCategoryMapping:
     """Verify the derived PROMPT_TO_CATEGORY mapping is consistent."""
 
     def test_all_prompts_map_to_valid_category(self):
+        valid_categories = set(SIGN_TAXONOMY.keys()) | {"not_a_sign"}
         for prompt, cat in PROMPT_TO_CATEGORY.items():
-            assert cat in SIGN_TAXONOMY, (
+            assert cat in valid_categories, (
                 f"Prompt '{prompt}' maps to unknown category '{cat}'"
             )
 
     def test_prompt_count_matches(self):
         total_prompts = sum(len(info["prompts"]) for info in SIGN_TAXONOMY.values())
+        total_prompts += len(NEGATIVE_PROMPTS)
         assert len(ALL_PROMPTS) == total_prompts
+
+    def test_negative_prompts_map_to_not_a_sign(self):
+        for prompt in NEGATIVE_PROMPTS:
+            assert PROMPT_TO_CATEGORY[prompt] == "not_a_sign"
 
     def test_category_descriptions_complete(self):
         assert set(CATEGORY_DESCRIPTIONS.keys()) == set(ALL_CATEGORIES)

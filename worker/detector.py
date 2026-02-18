@@ -160,13 +160,39 @@ def load_image_from_path(path: str) -> Image.Image:
 # Stage 1: YOLO sign localisation
 # ---------------------------------------------------------------------------
 
-# COCO class IDs that correspond to "traffic sign"-like objects.
-# 9 = traffic light, 11 = stop sign.  We also accept any high-confidence
-# detection and let CLIP decide if it is actually a sign.
+# COCO class IDs that are directly sign-related.
+# 9 = traffic light, 11 = stop sign.
 _SIGN_RELATED_COCO_IDS = {9, 11}
 
-# Broader YOLO classes we still pass to CLIP for verification
-_PASSTHROUGH_COCO_IDS = {9, 11}
+# COCO classes that are clearly NOT signs — skip these entirely to avoid
+# wasting CLIP inference on objects that can never be traffic signs.
+_NEVER_SIGN_COCO_IDS = {
+    0,   # person
+    1,   # bicycle
+    2,   # car
+    3,   # motorcycle
+    5,   # bus
+    6,   # train
+    7,   # truck
+    14,  # bird
+    15,  # cat
+    16,  # dog
+    24,  # backpack
+    25,  # umbrella
+    26,  # handbag
+    28,  # suitcase
+    39,  # bottle
+    56,  # chair
+    57,  # couch
+    59,  # bed
+    60,  # dining table
+    62,  # tv
+    63,  # laptop
+    64,  # mouse
+    66,  # keyboard
+    67,  # cell phone
+    72,  # refrigerator
+}
 
 
 def _stage1_detect(
@@ -204,8 +230,12 @@ def _stage1_detect(
                 y2=float(xyxy[3]),
             )
 
+            # Skip objects that are clearly never signs
+            if cls_id in _NEVER_SIGN_COCO_IDS:
+                continue
+
             # Keep sign-related classes always; keep others only at high conf
-            if cls_id in _SIGN_RELATED_COCO_IDS or conf >= 0.4:
+            if cls_id in _SIGN_RELATED_COCO_IDS or conf >= 0.5:
                 candidates.append((bbox, conf, cls_id))
 
     # Sort by confidence descending
@@ -274,8 +304,12 @@ def _stage2_classify(
     sorted_cats = sorted(category_scores.items(), key=lambda x: x[1], reverse=True)
     best_cat, best_score = sorted_cats[0]
 
-    # Top-5 for diagnostics
-    top5 = dict(sorted_cats[:5])
+    # Top-5 for diagnostics (exclude not_a_sign from display)
+    top5 = dict(
+        (k, v) for k, v in sorted_cats[:6] if k != "not_a_sign"
+    )
+    # Keep only the top 5 actual sign categories
+    top5 = dict(list(top5.items())[:5])
 
     return best_cat, best_score, top5
 
@@ -310,6 +344,10 @@ def detect_signs(
         category, clip_conf_val, top5 = _stage2_classify(
             image, bbox, prompts, prompt_to_category, category_descriptions
         )
+
+        # Reject objects that CLIP thinks are not signs
+        if category == "not_a_sign":
+            continue
 
         # Filter by CLIP confidence
         if clip_conf_val < clip_conf:
@@ -349,7 +387,7 @@ def detect_signs_in_image(
     )
 
     yolo_conf = yolo_conf or float(os.environ.get("DETECTION_CONFIDENCE_THRESHOLD", 0.25))
-    clip_conf = clip_conf or float(os.environ.get("CLASSIFICATION_CONFIDENCE_THRESHOLD", 0.15))
+    clip_conf = clip_conf or float(os.environ.get("CLASSIFICATION_CONFIDENCE_THRESHOLD", 0.30))
     max_detections = max_detections or int(os.environ.get("MAX_DETECTIONS_PER_IMAGE", 50))
 
     return detect_signs(
