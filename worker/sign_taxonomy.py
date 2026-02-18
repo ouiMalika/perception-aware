@@ -1,326 +1,531 @@
 """
-Comprehensive traffic sign taxonomy for zero-shot CLIP classification.
+Traffic sign taxonomy and class-name mapping for YOLOv7-based detection.
 
-Defines 20+ sign categories with CLIP-optimized text prompts for each.
-Each category includes multiple prompt variations to improve zero-shot accuracy.
+This module serves two purposes:
+
+1. TAXONOMY – a comprehensive registry of US traffic sign categories with
+   descriptions and priority levels (used for visualisation and output).
+
+2. CLASS MAPPING – translates raw YOLOv7 class IDs/names (which depend on
+   the training dataset) into the taxonomy categories above.
+
+Supported model families
+------------------------
+COCO (yolov7.pt official weights)
+    80 general classes.  Only class 9 (traffic light) and 11 (stop sign)
+    are relevant for traffic sign detection.
+
+LISA (Laboratory for Intelligent & Safe Automobiles Traffic Sign Dataset)
+    47 US traffic sign classes.  Class names like "stop", "yield",
+    "speedLimit25", "pedestrianCrossing", etc.
+
+MTSD (Mapillary Traffic Sign Dataset)
+    400+ classes named like "regulatory--stop--g1",
+    "warning--pedestrian-crossing--g1", etc.
+
+Custom
+    Any model whose class names contain keywords from the taxonomy
+    (fuzzy keyword match as a last resort).
+
+The function `map_class_to_category(class_id, class_name)` is the single
+entry-point used by detector.py.
 """
 
+import re
+
 # ---------------------------------------------------------------------------
-# Master category registry
-# ---------------------------------------------------------------------------
-# Each key is a canonical sign category.
-# "prompts" are fed to CLIP as candidate labels (zero-shot classification).
-# "description" is a human-readable summary.
-# "priority" ranks urgency for driving decisions (1 = highest).
+# Master taxonomy registry
 # ---------------------------------------------------------------------------
 
-SIGN_TAXONOMY = {
-    # === Regulatory Signs ===
+SIGN_TAXONOMY: dict[str, dict] = {
+    # ── Regulatory ──────────────────────────────────────────────────────────
     "stop": {
-        "description": "Stop sign - requires full stop at intersection",
+        "description": "Stop sign – full stop required",
         "priority": 1,
-        "prompts": [
-            "a red octagonal stop sign",
-            "a stop sign on the road",
-            "traffic stop sign",
-        ],
+        "color": "red",
     },
     "yield": {
-        "description": "Yield sign - give right of way",
+        "description": "Yield – give right of way",
         "priority": 1,
-        "prompts": [
-            "a red and white triangular yield sign",
-            "a yield sign on the road",
-            "traffic yield sign",
-            "give way sign",
-        ],
+        "color": "red",
     },
     "speed_limit": {
-        "description": "Speed limit sign - maximum allowed speed",
+        "description": "Speed limit (any numeric value)",
         "priority": 2,
-        "prompts": [
-            "a speed limit sign showing a number",
-            "speed limit traffic sign",
-            "maximum speed sign",
-            "a round white sign with a red border showing speed",
-        ],
+        "color": "white",
     },
     "no_entry": {
-        "description": "No entry / do not enter sign",
+        "description": "Do Not Enter / Wrong Way",
         "priority": 1,
-        "prompts": [
-            "a red circular no entry sign",
-            "do not enter traffic sign",
-            "a round red sign with a white bar",
-            "wrong way do not enter sign",
-        ],
+        "color": "red",
     },
-    "no_turn": {
-        "description": "No turn allowed (no left turn, no right turn, no U-turn)",
+    "no_left_turn": {
+        "description": "No left turn",
         "priority": 2,
-        "prompts": [
-            "a no turn traffic sign",
-            "no left turn sign",
-            "no right turn sign",
-            "no U-turn sign",
-            "a sign with a crossed-out turning arrow",
-        ],
+        "color": "red",
+    },
+    "no_right_turn": {
+        "description": "No right turn",
+        "priority": 2,
+        "color": "red",
+    },
+    "no_u_turn": {
+        "description": "No U-turn",
+        "priority": 2,
+        "color": "red",
     },
     "one_way": {
-        "description": "One way traffic sign",
+        "description": "One-way traffic",
         "priority": 2,
-        "prompts": [
-            "a one way street sign",
-            "one way traffic sign with arrow",
-            "black and white one way sign",
-        ],
+        "color": "black",
     },
-    "keep_right_left": {
-        "description": "Keep right or keep left sign",
+    "keep_right": {
+        "description": "Keep right (or keep left)",
         "priority": 2,
-        "prompts": [
-            "keep right traffic sign",
-            "keep left traffic sign",
-            "a blue circular sign with a white arrow",
-        ],
+        "color": "blue",
+    },
+    "turn_only": {
+        "description": "Mandatory turn direction",
+        "priority": 2,
+        "color": "white",
+    },
+    "no_parking": {
+        "description": "No parking / No standing",
+        "priority": 3,
+        "color": "red",
+    },
+    "parking": {
+        "description": "Parking allowed",
+        "priority": 4,
+        "color": "blue",
+    },
+    "no_trucks": {
+        "description": "No trucks / weight limit",
+        "priority": 2,
+        "color": "red",
+    },
+    "hov_lane": {
+        "description": "High-Occupancy Vehicle lane",
+        "priority": 3,
+        "color": "white",
+    },
+    "divided_highway": {
+        "description": "Divided highway begins / ends",
+        "priority": 2,
+        "color": "yellow",
     },
 
-    # === Warning Signs ===
+    # ── Warning ──────────────────────────────────────────────────────────────
     "pedestrian_crossing": {
         "description": "Pedestrian crossing ahead",
         "priority": 1,
-        "prompts": [
-            "a pedestrian crossing warning sign",
-            "crosswalk sign with walking person",
-            "a yellow diamond sign with a person walking",
-            "pedestrian crossing ahead sign",
-            "school crossing sign",
-        ],
-    },
-    "road_work": {
-        "description": "Road work / construction ahead",
-        "priority": 2,
-        "prompts": [
-            "a road work construction sign",
-            "road construction ahead warning sign",
-            "an orange diamond sign with a worker figure",
-            "men at work traffic sign",
-            "road maintenance sign",
-        ],
-    },
-    "curve_warning": {
-        "description": "Curve ahead warning (sharp turn, winding road)",
-        "priority": 2,
-        "prompts": [
-            "a curve ahead warning sign",
-            "sharp turn warning sign",
-            "winding road sign",
-            "a yellow diamond sign with a curved arrow",
-            "dangerous curve sign",
-        ],
-    },
-    "intersection_warning": {
-        "description": "Intersection or junction ahead warning",
-        "priority": 2,
-        "prompts": [
-            "an intersection ahead warning sign",
-            "junction warning sign",
-            "crossroads warning sign",
-            "a yellow sign showing intersecting roads",
-        ],
-    },
-    "slippery_road": {
-        "description": "Slippery road surface warning",
-        "priority": 2,
-        "prompts": [
-            "a slippery road warning sign",
-            "slippery when wet sign",
-            "a yellow sign with a skidding car",
-        ],
-    },
-    "animal_crossing": {
-        "description": "Animal crossing warning (deer, cattle, etc.)",
-        "priority": 2,
-        "prompts": [
-            "an animal crossing warning sign",
-            "deer crossing sign",
-            "a yellow sign with an animal silhouette",
-            "cattle crossing sign",
-            "wildlife crossing sign",
-        ],
+        "color": "yellow",
     },
     "school_zone": {
-        "description": "School zone - children present",
+        "description": "School zone – children present",
         "priority": 1,
-        "prompts": [
-            "a school zone warning sign",
-            "school zone sign with children",
-            "school crossing zone sign",
-            "a yellow pentagon sign with children figures",
-        ],
+        "color": "yellow",
+    },
+    "road_work": {
+        "description": "Road work / construction zone",
+        "priority": 2,
+        "color": "orange",
+    },
+    "curve_warning": {
+        "description": "Curve or sharp turn ahead",
+        "priority": 2,
+        "color": "yellow",
+    },
+    "intersection_warning": {
+        "description": "Intersection ahead",
+        "priority": 2,
+        "color": "yellow",
+    },
+    "slippery_road": {
+        "description": "Slippery when wet",
+        "priority": 2,
+        "color": "yellow",
+    },
+    "animal_crossing": {
+        "description": "Animal crossing (deer, cattle, etc.)",
+        "priority": 2,
+        "color": "yellow",
     },
     "railroad_crossing": {
         "description": "Railroad crossing ahead",
         "priority": 1,
-        "prompts": [
-            "a railroad crossing sign",
-            "railway crossing warning sign",
-            "a round yellow sign with an X and R R",
-            "train crossing sign",
-        ],
+        "color": "yellow",
     },
     "merge_warning": {
-        "description": "Merge or lane ends warning",
+        "description": "Merge / lane ends",
         "priority": 2,
-        "prompts": [
-            "a merge warning sign",
-            "lane ends merge sign",
-            "merging traffic sign",
-            "a yellow diamond sign with merging arrows",
-        ],
+        "color": "yellow",
+    },
+    "hill_grade": {
+        "description": "Hill or steep grade",
+        "priority": 2,
+        "color": "yellow",
+    },
+    "narrow_bridge": {
+        "description": "Narrow bridge or road narrows",
+        "priority": 2,
+        "color": "yellow",
+    },
+    "two_way_traffic": {
+        "description": "Two-way traffic ahead",
+        "priority": 2,
+        "color": "yellow",
+    },
+    "low_clearance": {
+        "description": "Low clearance / height limit",
+        "priority": 2,
+        "color": "yellow",
+    },
+    "bicycle_crossing": {
+        "description": "Bicycle crossing",
+        "priority": 2,
+        "color": "yellow",
     },
 
-    # === Guide / Information Signs ===
+    # ── Guide / Information ──────────────────────────────────────────────────
     "direction": {
-        "description": "Direction sign (pointing to destinations)",
+        "description": "Direction sign to destination",
         "priority": 3,
-        "prompts": [
-            "a green highway direction sign",
-            "a road direction sign pointing to a city",
-            "green direction sign with white text and arrow",
-            "highway guide sign",
-            "road name direction sign",
-        ],
+        "color": "green",
     },
     "exit": {
-        "description": "Highway exit sign",
+        "description": "Highway exit",
         "priority": 3,
-        "prompts": [
-            "a highway exit sign",
-            "freeway exit sign with exit number",
-            "green highway exit sign",
-            "a sign showing an exit ramp",
-            "interstate exit sign",
-        ],
+        "color": "green",
     },
     "highway_route": {
         "description": "Highway / interstate route marker",
         "priority": 3,
-        "prompts": [
-            "a highway route number sign",
-            "an interstate shield sign",
-            "a US route marker sign",
-            "a state highway number sign",
-        ],
+        "color": "green",
     },
     "distance_marker": {
-        "description": "Distance or mileage marker sign",
+        "description": "Distance / mileage marker",
         "priority": 4,
-        "prompts": [
-            "a green distance marker sign",
-            "a milepost sign",
-            "a sign showing distances to cities",
-        ],
+        "color": "green",
     },
-    "parking": {
-        "description": "Parking sign",
+    "rest_area": {
+        "description": "Rest area / service area",
         "priority": 4,
-        "prompts": [
-            "a blue parking sign with letter P",
-            "a parking allowed sign",
-            "no parking sign",
-            "parking area sign",
-        ],
+        "color": "blue",
     },
     "information": {
-        "description": "General information sign (hospital, gas, food, rest area)",
+        "description": "General information (hospital, gas, food)",
         "priority": 4,
-        "prompts": [
-            "a blue highway information sign",
-            "a road services sign showing gas or food",
-            "hospital sign on road",
-            "rest area sign",
-            "tourist information sign",
-        ],
+        "color": "blue",
     },
 
-    # === Traffic Control Signs ===
+    # ── Traffic Control ──────────────────────────────────────────────────────
     "traffic_light": {
-        "description": "Traffic signal / traffic light ahead",
+        "description": "Traffic signal / traffic light",
         "priority": 1,
-        "prompts": [
-            "a traffic signal ahead sign",
-            "traffic light warning sign",
-            "a sign showing a traffic light",
-        ],
+        "color": "yellow",
     },
     "roundabout": {
-        "description": "Roundabout / traffic circle ahead",
+        "description": "Roundabout ahead",
         "priority": 2,
-        "prompts": [
-            "a roundabout sign",
-            "traffic circle sign",
-            "a sign with circular arrows for roundabout",
-            "rotary traffic sign",
-        ],
+        "color": "yellow",
     },
 
-    # === Temporary / Construction Signs ===
+    # ── Temporary / Construction ─────────────────────────────────────────────
     "detour": {
-        "description": "Detour sign",
+        "description": "Detour",
         "priority": 2,
-        "prompts": [
-            "a detour sign with arrow",
-            "an orange detour traffic sign",
-            "road detour sign",
-        ],
+        "color": "orange",
     },
     "lane_closure": {
-        "description": "Lane closure or road closed sign",
+        "description": "Lane closure / road closed",
         "priority": 2,
-        "prompts": [
-            "a road closed sign",
-            "lane closure sign",
-            "a sign indicating road closure ahead",
-            "an orange road closed barricade sign",
-        ],
+        "color": "orange",
+    },
+    "signal_ahead": {
+        "description": "Signal / traffic light ahead (warning)",
+        "priority": 1,
+        "color": "yellow",
+    },
+    "added_lane": {
+        "description": "Added lane / extra lane begins",
+        "priority": 3,
+        "color": "yellow",
     },
 }
 
-# ---------------------------------------------------------------------------
-# Derived structures for pipeline use
-# ---------------------------------------------------------------------------
+# Derived helpers
+ALL_CATEGORIES: list[str] = list(SIGN_TAXONOMY.keys())
 
-ALL_CATEGORIES = list(SIGN_TAXONOMY.keys())
-
-# Flat list of every CLIP prompt, mapped back to its category
-PROMPT_TO_CATEGORY = {}
-ALL_PROMPTS = []
-for category, info in SIGN_TAXONOMY.items():
-    for prompt in info["prompts"]:
-        PROMPT_TO_CATEGORY[prompt] = category
-        ALL_PROMPTS.append(prompt)
-
-# Priority lookup
-CATEGORY_PRIORITY = {cat: info["priority"] for cat, info in SIGN_TAXONOMY.items()}
-
-# Human-readable descriptions
-CATEGORY_DESCRIPTIONS = {
-    cat: info["description"] for cat, info in SIGN_TAXONOMY.items()
+CATEGORY_DESCRIPTIONS: dict[str, str] = {
+    k: v["description"] for k, v in SIGN_TAXONOMY.items()
 }
+
+CATEGORY_PRIORITY: dict[str, int] = {
+    k: v["priority"] for k, v in SIGN_TAXONOMY.items()
+}
+
+CATEGORY_COLOR: dict[str, str] = {
+    k: v["color"] for k, v in SIGN_TAXONOMY.items()
+}
+
+
+# ---------------------------------------------------------------------------
+# COCO class mapping
+# ---------------------------------------------------------------------------
+# COCO only contains two traffic-sign-adjacent classes:
+#   9  = traffic light
+#   11 = stop sign
+# Everything else is non-sign and should return None.
+
+_COCO_MAP: dict[int, str] = {
+    9: "traffic_light",
+    11: "stop",
+}
+
+
+# ---------------------------------------------------------------------------
+# LISA dataset class mapping
+# ---------------------------------------------------------------------------
+# 47 US traffic sign classes. Source:
+#   http://cvrr.ucsd.edu/LISA/lisa-traffic-sign-dataset.html
+# Names are the exact class labels used in LISA annotations.
+
+_LISA_MAP: dict[str, str] = {
+    "stop": "stop",
+    "yield": "yield",
+    "signalahead": "signal_ahead",
+    "pedestriancrossing": "pedestrian_crossing",
+    "schoolspeedlimit": "school_zone",
+    "school": "school_zone",
+    "speedlimit": "speed_limit",
+    "speedlimit15": "speed_limit",
+    "speedlimit25": "speed_limit",
+    "speedlimit30": "speed_limit",
+    "speedlimit35": "speed_limit",
+    "speedlimit40": "speed_limit",
+    "speedlimit45": "speed_limit",
+    "speedlimit50": "speed_limit",
+    "speedlimit55": "speed_limit",
+    "speedlimit65": "speed_limit",
+    "donotenter": "no_entry",
+    "wrongway": "no_entry",
+    "keepright": "keep_right",
+    "keepleft": "keep_right",
+    "noleftturn": "no_left_turn",
+    "norightturn": "no_right_turn",
+    "noparking": "no_parking",
+    "merge": "merge_warning",
+    "addedlane": "added_lane",
+    "laneends": "merge_warning",
+    "turnleft": "turn_only",
+    "turnright": "turn_only",
+    "uturns": "no_u_turn",
+    "railroad": "railroad_crossing",
+    "trafficlight": "traffic_light",
+    "roundabout": "roundabout",
+    "dip": "hill_grade",
+    "bump": "hill_grade",
+    "slipperywhen wet": "slippery_road",
+    "slippery": "slippery_road",
+    "roadwork": "road_work",
+    "workzone": "road_work",
+    "oneway": "one_way",
+    "dividedhighway": "divided_highway",
+    "dividedends": "divided_highway",
+    "bicyclecrossing": "bicycle_crossing",
+    "animalsoncrossing": "animal_crossing",
+    "deer": "animal_crossing",
+    "low clearance": "low_clearance",
+    "narrowbridge": "narrow_bridge",
+    "twoway traffic": "two_way_traffic",
+}
+
+
+# ---------------------------------------------------------------------------
+# MTSD (Mapillary Traffic Sign Dataset) keyword mapping
+# ---------------------------------------------------------------------------
+# MTSD names follow the pattern: <type>--<name>--<version>
+# e.g. "regulatory--stop--g1", "warning--pedestrian-crossing--g1"
+# We strip the type prefix and version suffix, then match keywords.
+
+_MTSD_KEYWORD_MAP: list[tuple[str, str]] = [
+    # Regulatory
+    ("stop", "stop"),
+    ("yield", "yield"),
+    ("speed-limit", "speed_limit"),
+    ("maximum-speed", "speed_limit"),
+    ("do-not-enter", "no_entry"),
+    ("wrong-way", "no_entry"),
+    ("no-left-turn", "no_left_turn"),
+    ("no-right-turn", "no_right_turn"),
+    ("no-u-turn", "no_u_turn"),
+    ("no-parking", "no_parking"),
+    ("no-stopping", "no_parking"),
+    ("parking", "parking"),
+    ("one-way", "one_way"),
+    ("keep-right", "keep_right"),
+    ("keep-left", "keep_right"),
+    ("turn-left", "turn_only"),
+    ("turn-right", "turn_only"),
+    ("hov", "hov_lane"),
+    ("no-trucks", "no_trucks"),
+    ("weight-limit", "no_trucks"),
+    ("height-limit", "low_clearance"),
+    ("low-clearance", "low_clearance"),
+    # Warning
+    ("pedestrian-crossing", "pedestrian_crossing"),
+    ("school", "school_zone"),
+    ("road-work", "road_work"),
+    ("construction", "road_work"),
+    ("curve", "curve_warning"),
+    ("sharp-turn", "curve_warning"),
+    ("winding-road", "curve_warning"),
+    ("intersection", "intersection_warning"),
+    ("slippery", "slippery_road"),
+    ("animal", "animal_crossing"),
+    ("deer", "animal_crossing"),
+    ("cattle", "animal_crossing"),
+    ("railroad", "railroad_crossing"),
+    ("train", "railroad_crossing"),
+    ("merge", "merge_warning"),
+    ("lane-ends", "merge_warning"),
+    ("hill", "hill_grade"),
+    ("grade", "hill_grade"),
+    ("narrow", "narrow_bridge"),
+    ("two-way", "two_way_traffic"),
+    ("bicycle", "bicycle_crossing"),
+    ("bike", "bicycle_crossing"),
+    ("signal-ahead", "signal_ahead"),
+    ("roundabout", "roundabout"),
+    ("traffic-circle", "roundabout"),
+    # Guide
+    ("exit", "exit"),
+    ("route", "highway_route"),
+    ("interstate", "highway_route"),
+    ("highway", "highway_route"),
+    ("distance", "distance_marker"),
+    ("milepost", "distance_marker"),
+    ("direction", "direction"),
+    ("rest-area", "rest_area"),
+    ("service", "rest_area"),
+    ("hospital", "information"),
+    ("gas", "information"),
+    ("food", "information"),
+    # Temporary
+    ("detour", "detour"),
+    ("road-closed", "lane_closure"),
+    ("lane-closed", "lane_closure"),
+    ("added-lane", "added_lane"),
+    # Traffic control
+    ("traffic-light", "traffic_light"),
+    ("traffic-signal", "traffic_light"),
+]
+
+
+# ---------------------------------------------------------------------------
+# Generic keyword fallback (any model)
+# ---------------------------------------------------------------------------
+# Applied when COCO/LISA/MTSD pattern matching all fail.
+
+_GENERIC_KEYWORDS: list[tuple[str, str]] = [
+    ("stop", "stop"),
+    ("yield", "yield"),
+    ("speed", "speed_limit"),
+    ("pedestrian", "pedestrian_crossing"),
+    ("crosswalk", "pedestrian_crossing"),
+    ("school", "school_zone"),
+    ("work", "road_work"),
+    ("construction", "road_work"),
+    ("curve", "curve_warning"),
+    ("turn", "curve_warning"),
+    ("railroad", "railroad_crossing"),
+    ("rail", "railroad_crossing"),
+    ("merge", "merge_warning"),
+    ("animal", "animal_crossing"),
+    ("deer", "animal_crossing"),
+    ("slippery", "slippery_road"),
+    ("no entry", "no_entry"),
+    ("do not enter", "no_entry"),
+    ("wrong way", "no_entry"),
+    ("one way", "one_way"),
+    ("keep right", "keep_right"),
+    ("keep left", "keep_right"),
+    ("no left", "no_left_turn"),
+    ("no right", "no_right_turn"),
+    ("u-turn", "no_u_turn"),
+    ("uturn", "no_u_turn"),
+    ("parking", "parking"),
+    ("no park", "no_parking"),
+    ("exit", "exit"),
+    ("route", "highway_route"),
+    ("roundabout", "roundabout"),
+    ("detour", "detour"),
+    ("closed", "lane_closure"),
+    ("signal", "signal_ahead"),
+    ("traffic light", "traffic_light"),
+    ("light", "traffic_light"),
+]
+
+
+# ---------------------------------------------------------------------------
+# Public mapping entry-point
+# ---------------------------------------------------------------------------
+
+
+def map_class_to_category(class_id: int, class_name: str) -> str | None:
+    """
+    Map a YOLOv7 class (id + name) to a taxonomy category key.
+
+    Returns None if the class is not a traffic sign (e.g. car, person).
+
+    Strategy (in order):
+      1. COCO numeric ID check
+      2. Exact LISA name match (case-insensitive, no spaces)
+      3. MTSD keyword match on the name segment
+      4. Generic keyword scan of the raw class name
+    """
+    name_lower = class_name.lower().strip()
+    name_nospace = re.sub(r"[\s\-_]", "", name_lower)
+
+    # 1. COCO numeric mapping
+    if class_id in _COCO_MAP:
+        return _COCO_MAP[class_id]
+
+    # 2. LISA exact match (normalise to no-spaces lowercase)
+    lisa_key = name_nospace
+    if lisa_key in _LISA_MAP:
+        return _LISA_MAP[lisa_key]
+
+    # 3. MTSD keyword scan
+    #    MTSD names: "regulatory--stop--g1" → segments = ["regulatory","stop","g1"]
+    #    We join the middle segment(s) for keyword matching.
+    if "--" in name_lower:
+        parts = name_lower.split("--")
+        # Drop type prefix (first) and version suffix (last)
+        middle = "--".join(parts[1:-1]) if len(parts) > 2 else parts[-1]
+        for keyword, category in _MTSD_KEYWORD_MAP:
+            if keyword in middle:
+                return category
+        # Also try full name
+        full = "--".join(parts)
+        for keyword, category in _MTSD_KEYWORD_MAP:
+            if keyword in full:
+                return category
+
+    # 4. Generic keyword fallback
+    for keyword, category in _GENERIC_KEYWORDS:
+        if keyword in name_lower:
+            return category
+
+    # Not a traffic sign; caller will skip this detection
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Convenience helpers for downstream modules
+# ---------------------------------------------------------------------------
 
 
 def get_categories_by_priority(max_priority: int = 4) -> list[str]:
-    """Return categories filtered by maximum priority level."""
-    return [
-        cat
-        for cat, pri in CATEGORY_PRIORITY.items()
-        if pri <= max_priority
-    ]
-
-
-def get_prompts_for_category(category: str) -> list[str]:
-    """Return the CLIP prompts for a given sign category."""
-    if category not in SIGN_TAXONOMY:
-        raise ValueError(f"Unknown category: {category}")
-    return SIGN_TAXONOMY[category]["prompts"]
+    return [c for c, p in CATEGORY_PRIORITY.items() if p <= max_priority]

@@ -1,18 +1,29 @@
 """
-Two-stage traffic sign detection pipeline.
+YOLOv7-based traffic sign detection pipeline.
 
-Stage 1: YOLOv8 localises candidate sign regions (bounding boxes).
-Stage 2: CLIP zero-shot classifies each crop into the sign taxonomy.
+Single-stage detection: YOLOv7 localises AND classifies traffic signs
+in one forward pass. This is the approach described in:
 
-This architecture decouples *where* signs are from *what* they mean,
-giving us flexible coverage of 25+ sign categories without needing
-category-specific training data.
+  "Traffic Sign Detection and Recognition Using YOLOv7"
+  Applied Sciences 13(20), 11402 (2023)
+  https://www.mdpi.com/2076-3417/13/20/11402
+
+Model options (controlled via YOLOV7_MODEL_TYPE env var):
+  - "coco"    : Official yolov7.pt weights (COCO 80 classes).
+                Only detects stop signs & traffic lights out of the box.
+                Good for quick smoke-testing.
+  - "traffic" : Custom weights trained on a US traffic sign dataset
+                (LISA, MTSD, or your own). Set YOLOV7_WEIGHTS_PATH to
+                point at the .pt file.  Detects 40-400+ sign classes.
+
+Class name → taxonomy mapping is handled by sign_taxonomy.py so the
+downstream pipeline stays the same regardless of which model is loaded.
 """
 
-import io
 import logging
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 import requests
@@ -22,44 +33,76 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Lazy-loaded singletons (heavy models loaded once per worker process)
+# Lazy-loaded model singleton
 # ---------------------------------------------------------------------------
+
 _yolo_model = None
-_clip_model = None
-_clip_processor = None
-_clip_tokenizer = None
+_model_class_names: list[str] = []
 
 
-def _get_yolo():
-    """Load YOLOv8 model (downloads on first call)."""
-    global _yolo_model
-    if _yolo_model is None:
-        from ultralytics import YOLO
+def _resolve_weights() -> str:
+    """
+    Return the path (or URL) for the YOLOv7 weights file.
 
-        model_size = os.environ.get("YOLO_MODEL_SIZE", "yolov8m")
-        logger.info("Loading YOLO model: %s", model_size)
-        _yolo_model = YOLO(f"{model_size}.pt")
-    return _yolo_model
+    Priority:
+      1. YOLOV7_WEIGHTS_PATH   – absolute path to a custom .pt file
+      2. YOLOV7_WEIGHTS_URL    – URL to download weights from
+      3. Default               – 'yolov7.pt' (auto-downloaded by torch.hub)
+    """
+    if p := os.environ.get("YOLOV7_WEIGHTS_PATH", "").strip():
+        if not Path(p).exists():
+            raise FileNotFoundError(f"YOLOV7_WEIGHTS_PATH not found: {p}")
+        return p
+    # Default: let torch.hub download official yolov7.pt on first run
+    return "yolov7.pt"
 
 
-def _get_clip():
-    """Load CLIP model + processor (downloads on first call)."""
-    global _clip_model, _clip_processor, _clip_tokenizer
-    if _clip_model is None:
-        from transformers import CLIPModel, CLIPProcessor
+def _get_model():
+    """
+    Load YOLOv7 via torch.hub (downloads code + weights once, then cached).
 
-        model_name = "openai/clip-vit-base-patch32"
-        logger.info("Loading CLIP model: %s", model_name)
-        _clip_model = CLIPModel.from_pretrained(model_name)
-        _clip_processor = CLIPProcessor.from_pretrained(model_name)
-        _clip_tokenizer = _clip_processor.tokenizer
-        _clip_model.eval()
-    return _clip_model, _clip_processor
+    Returns the model and populates _model_class_names.
+    """
+    global _yolo_model, _model_class_names
+
+    if _yolo_model is not None:
+        return _yolo_model
+
+    weights = _resolve_weights()
+    logger.info("Loading YOLOv7 model from: %s", weights)
+
+    # torch.hub will clone WongKinYiu/yolov7 on first call (cached in
+    # ~/.cache/torch/hub/).  'custom' lets us load any .pt file.
+    model = torch.hub.load(
+        "WongKinYiu/yolov7",
+        "custom",
+        path_or_model=weights,
+        force_reload=False,
+        trust_repo=True,
+        verbose=False,
+    )
+
+    # Move to GPU if available, else CPU
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = model.to(device)
+    model.eval()
+
+    _model_class_names = model.names if hasattr(model, "names") else []
+    logger.info(
+        "YOLOv7 loaded on %s with %d classes: %s",
+        device,
+        len(_model_class_names),
+        _model_class_names[:10],
+    )
+
+    _yolo_model = model
+    return model
 
 
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class BoundingBox:
@@ -95,14 +138,14 @@ class BoundingBox:
 
 @dataclass
 class SignDetection:
-    """A single detected and classified traffic sign."""
+    """A single detected traffic sign from YOLOv7."""
+
     bbox: BoundingBox
-    category: str
+    category: str                   # mapped taxonomy category
     category_description: str
-    confidence: float          # combined YOLO * CLIP confidence
-    yolo_confidence: float     # raw YOLO detection confidence
-    clip_confidence: float     # raw CLIP classification confidence
-    clip_scores: dict = field(default_factory=dict)  # top-5 category scores
+    confidence: float               # YOLOv7 detection confidence
+    raw_class_id: int               # original model class index
+    raw_class_name: str             # original model class label
 
     def to_dict(self) -> dict:
         return {
@@ -110,17 +153,15 @@ class SignDetection:
             "category": self.category,
             "description": self.category_description,
             "confidence": round(self.confidence, 4),
-            "yolo_confidence": round(self.yolo_confidence, 4),
-            "clip_confidence": round(self.clip_confidence, 4),
-            "top_scores": {
-                k: round(v, 4) for k, v in self.clip_scores.items()
-            },
+            "raw_class_id": self.raw_class_id,
+            "raw_class_name": self.raw_class_name,
         }
 
 
 @dataclass
 class DetectionResult:
     """Full result for one image."""
+
     image_url: str
     image_width: int
     image_height: int
@@ -144,227 +185,157 @@ class DetectionResult:
 # Image loading helpers
 # ---------------------------------------------------------------------------
 
+
 def load_image_from_url(url: str, timeout: int = 30) -> Image.Image:
-    """Download an image from a URL and return as PIL Image."""
     resp = requests.get(url, timeout=timeout)
     resp.raise_for_status()
-    return Image.open(io.BytesIO(resp.content)).convert("RGB")
+    from io import BytesIO
+    return Image.open(BytesIO(resp.content)).convert("RGB")
 
 
 def load_image_from_path(path: str) -> Image.Image:
-    """Load a local image file and return as PIL Image."""
     return Image.open(path).convert("RGB")
 
 
 # ---------------------------------------------------------------------------
-# Stage 1: YOLO sign localisation
+# YOLOv7 inference
 # ---------------------------------------------------------------------------
 
-# COCO class IDs that correspond to "traffic sign"-like objects.
-# 9 = traffic light, 11 = stop sign.  We also accept any high-confidence
-# detection and let CLIP decide if it is actually a sign.
-_SIGN_RELATED_COCO_IDS = {9, 11}
 
-# Broader YOLO classes we still pass to CLIP for verification
-_PASSTHROUGH_COCO_IDS = {9, 11}
-
-
-def _stage1_detect(
+def _run_yolov7(
     image: Image.Image,
     conf_threshold: float = 0.25,
+    iou_threshold: float = 0.45,
+    img_size: int = 640,
     max_detections: int = 50,
-) -> list[tuple[BoundingBox, float, int]]:
+) -> list[tuple[BoundingBox, float, int, str]]:
     """
-    Run YOLOv8 on an image and return candidate bounding boxes.
+    Run a single YOLOv7 forward pass on a PIL image.
 
-    Returns list of (BoundingBox, confidence, class_id) tuples.
-    We keep ALL detections and let Stage 2 filter by sign-ness,
-    but we favour sign-related COCO classes with a lower threshold.
+    Returns list of (BoundingBox, confidence, class_id, class_name).
     """
-    model = _get_yolo()
-    results = model.predict(
-        source=np.array(image),
-        conf=conf_threshold,
-        max_det=max_detections,
-        verbose=False,
-    )
+    model = _get_model()
 
-    candidates = []
-    for result in results:
-        boxes = result.boxes
-        for i in range(len(boxes)):
-            xyxy = boxes.xyxy[i].cpu().numpy()
-            conf = float(boxes.conf[i].cpu().numpy())
-            cls_id = int(boxes.cls[i].cpu().numpy())
+    # YOLOv7 hub model accepts PIL images directly
+    model.conf = conf_threshold
+    model.iou = iou_threshold
+    model.max_det = max_detections
 
-            bbox = BoundingBox(
-                x1=float(xyxy[0]),
-                y1=float(xyxy[1]),
-                x2=float(xyxy[2]),
-                y2=float(xyxy[3]),
-            )
+    # Resize hint passed via augment=False; hub model handles letterboxing
+    results = model(image, size=img_size)
 
-            # Keep sign-related classes always; keep others only at high conf
-            if cls_id in _SIGN_RELATED_COCO_IDS or conf >= 0.4:
-                candidates.append((bbox, conf, cls_id))
+    detections: list[tuple[BoundingBox, float, int, str]] = []
 
-    # Sort by confidence descending
-    candidates.sort(key=lambda x: x[1], reverse=True)
-    return candidates[:max_detections]
+    # results.xyxy[0] is a tensor: [x1, y1, x2, y2, conf, cls]
+    pred = results.xyxy[0].cpu().numpy()
+    names = results.names  # dict {id: name}
+
+    for row in pred:
+        x1, y1, x2, y2, conf, cls_id = row
+        cls_id = int(cls_id)
+        cls_name = names.get(cls_id, str(cls_id))
+        bbox = BoundingBox(float(x1), float(y1), float(x2), float(y2))
+        detections.append((bbox, float(conf), cls_id, cls_name))
+
+    detections.sort(key=lambda x: x[1], reverse=True)
+    return detections
 
 
 # ---------------------------------------------------------------------------
-# Stage 2: CLIP zero-shot classification
+# Class-name → taxonomy mapping
 # ---------------------------------------------------------------------------
 
-def _stage2_classify(
-    image: Image.Image,
-    bbox: BoundingBox,
-    prompts: list[str],
-    prompt_to_category: dict[str, str],
-    category_descriptions: dict[str, str],
-) -> tuple[str, float, dict]:
+
+def _map_to_taxonomy(
+    class_id: int,
+    class_name: str,
+) -> tuple[str, str] | None:
     """
-    Crop the image to the bounding box region and run CLIP zero-shot
-    classification against all sign prompts.
+    Map a YOLOv7 raw class to a taxonomy category.
 
-    Returns (best_category, clip_confidence, top5_scores).
+    Returns (category_key, description) or None if the detection is not
+    a traffic sign (e.g. a car, pedestrian, etc. from a COCO model).
     """
-    model, processor = _get_clip()
+    from sign_taxonomy import map_class_to_category, CATEGORY_DESCRIPTIONS
 
-    # Crop with a small margin for context
-    w, h = image.size
-    margin_x = (bbox.x2 - bbox.x1) * 0.1
-    margin_y = (bbox.y2 - bbox.y1) * 0.1
-    crop_box = (
-        max(0, bbox.x1 - margin_x),
-        max(0, bbox.y1 - margin_y),
-        min(w, bbox.x2 + margin_x),
-        min(h, bbox.y2 + margin_y),
-    )
-    crop = image.crop(crop_box)
+    category = map_class_to_category(class_id, class_name)
+    if category is None:
+        return None
 
-    # Minimum crop size check
-    if crop.size[0] < 10 or crop.size[1] < 10:
-        return "unknown", 0.0, {}
-
-    # Run CLIP
-    inputs = processor(
-        text=prompts,
-        images=crop,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-    )
-
-    with torch.no_grad():
-        outputs = model(**inputs)
-        logits = outputs.logits_per_image[0]
-        probs = torch.softmax(logits, dim=-1).cpu().numpy()
-
-    # Map prompt-level scores back to categories (take max per category)
-    category_scores: dict[str, float] = {}
-    for idx, prompt in enumerate(prompts):
-        cat = prompt_to_category[prompt]
-        score = float(probs[idx])
-        if cat not in category_scores or score > category_scores[cat]:
-            category_scores[cat] = score
-
-    # Sort by score
-    sorted_cats = sorted(category_scores.items(), key=lambda x: x[1], reverse=True)
-    best_cat, best_score = sorted_cats[0]
-
-    # Top-5 for diagnostics
-    top5 = dict(sorted_cats[:5])
-
-    return best_cat, best_score, top5
+    desc = CATEGORY_DESCRIPTIONS.get(category, category.replace("_", " ").title())
+    return category, desc
 
 
 # ---------------------------------------------------------------------------
-# Combined pipeline
+# Full detection pipeline (single image)
 # ---------------------------------------------------------------------------
-
-def detect_signs(
-    image: Image.Image,
-    prompts: list[str],
-    prompt_to_category: dict[str, str],
-    category_descriptions: dict[str, str],
-    yolo_conf: float = 0.25,
-    clip_conf: float = 0.15,
-    max_detections: int = 50,
-) -> list[SignDetection]:
-    """
-    Full two-stage detection pipeline on a single image.
-
-    1. YOLO finds candidate regions.
-    2. CLIP classifies each region against the sign taxonomy.
-    3. Low-confidence CLIP results are filtered out.
-    """
-    # Stage 1
-    candidates = _stage1_detect(image, conf_threshold=yolo_conf, max_detections=max_detections)
-    logger.info("Stage 1 (YOLO): %d candidates found", len(candidates))
-
-    detections = []
-    for bbox, yolo_conf_val, cls_id in candidates:
-        # Stage 2
-        category, clip_conf_val, top5 = _stage2_classify(
-            image, bbox, prompts, prompt_to_category, category_descriptions
-        )
-
-        # Filter by CLIP confidence
-        if clip_conf_val < clip_conf:
-            continue
-
-        combined_conf = yolo_conf_val * clip_conf_val
-        desc = category_descriptions.get(category, category)
-
-        detections.append(SignDetection(
-            bbox=bbox,
-            category=category,
-            category_description=desc,
-            confidence=combined_conf,
-            yolo_confidence=yolo_conf_val,
-            clip_confidence=clip_conf_val,
-            clip_scores=top5,
-        ))
-
-    # Sort by combined confidence
-    detections.sort(key=lambda d: d.confidence, reverse=True)
-    return detections[:max_detections]
 
 
 def detect_signs_in_image(
     image: Image.Image,
-    yolo_conf: float | None = None,
-    clip_conf: float | None = None,
+    conf_threshold: float | None = None,
+    iou_threshold: float | None = None,
+    img_size: int | None = None,
     max_detections: int | None = None,
 ) -> list[SignDetection]:
     """
-    High-level convenience function. Uses the full taxonomy automatically.
+    Run YOLOv7 on a single PIL image and return traffic sign detections.
+
+    Non-sign classes (cars, people, etc.) are filtered out via the
+    taxonomy mapping so only actual traffic signs are returned.
     """
-    from sign_taxonomy import (
-        ALL_PROMPTS,
-        PROMPT_TO_CATEGORY,
-        CATEGORY_DESCRIPTIONS,
+    conf_threshold = conf_threshold or float(
+        os.environ.get("DETECTION_CONFIDENCE_THRESHOLD", "0.25")
+    )
+    iou_threshold = iou_threshold or float(
+        os.environ.get("NMS_IOU_THRESHOLD", "0.45")
+    )
+    img_size = img_size or int(os.environ.get("YOLOV7_IMG_SIZE", "640"))
+    max_detections = max_detections or int(
+        os.environ.get("MAX_DETECTIONS_PER_IMAGE", "50")
     )
 
-    yolo_conf = yolo_conf or float(os.environ.get("DETECTION_CONFIDENCE_THRESHOLD", 0.25))
-    clip_conf = clip_conf or float(os.environ.get("CLASSIFICATION_CONFIDENCE_THRESHOLD", 0.15))
-    max_detections = max_detections or int(os.environ.get("MAX_DETECTIONS_PER_IMAGE", 50))
-
-    return detect_signs(
-        image=image,
-        prompts=ALL_PROMPTS,
-        prompt_to_category=PROMPT_TO_CATEGORY,
-        category_descriptions=CATEGORY_DESCRIPTIONS,
-        yolo_conf=yolo_conf,
-        clip_conf=clip_conf,
+    raw = _run_yolov7(
+        image,
+        conf_threshold=conf_threshold,
+        iou_threshold=iou_threshold,
+        img_size=img_size,
         max_detections=max_detections,
     )
 
+    sign_detections: list[SignDetection] = []
+    for bbox, conf, cls_id, cls_name in raw:
+        mapped = _map_to_taxonomy(cls_id, cls_name)
+        if mapped is None:
+            logger.debug("Skipping non-sign class: %s (%d)", cls_name, cls_id)
+            continue
+        category, description = mapped
+        sign_detections.append(
+            SignDetection(
+                bbox=bbox,
+                category=category,
+                category_description=description,
+                confidence=conf,
+                raw_class_id=cls_id,
+                raw_class_name=cls_name,
+            )
+        )
+
+    logger.info(
+        "YOLOv7 detected %d raw boxes → %d traffic signs",
+        len(raw),
+        len(sign_detections),
+    )
+    return sign_detections
+
+
+# ---------------------------------------------------------------------------
+# Convenience wrappers
+# ---------------------------------------------------------------------------
+
 
 def process_image_url(url: str, **kwargs) -> DetectionResult:
-    """Process a single image URL through the full pipeline."""
+    """Process a single image URL."""
     try:
         image = load_image_from_url(url)
         detections = detect_signs_in_image(image, **kwargs)
@@ -386,7 +357,7 @@ def process_image_url(url: str, **kwargs) -> DetectionResult:
 
 
 def process_image_path(path: str, **kwargs) -> DetectionResult:
-    """Process a single local image file through the full pipeline."""
+    """Process a local image file."""
     try:
         image = load_image_from_path(path)
         detections = detect_signs_in_image(image, **kwargs)

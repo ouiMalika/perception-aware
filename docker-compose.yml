@@ -56,15 +56,20 @@ services:
     environment:
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
-      YOLO_MODEL_SIZE: yolov8m
+      # YOLOv7 model weights.
+      # Default: 'yolov7.pt' downloaded via torch.hub on first run.
+      # For traffic-sign-specific weights (LISA, MTSD, custom), set:
+      #   YOLOV7_WEIGHTS_PATH: /weights/yolov7_traffic.pt
+      # and mount the file into the container.
+      YOLOV7_IMG_SIZE: "640"
       DETECTION_CONFIDENCE_THRESHOLD: "0.25"
-      CLASSIFICATION_CONFIDENCE_THRESHOLD: "0.15"
+      NMS_IOU_THRESHOLD: "0.45"
       MAX_DETECTIONS_PER_IMAGE: "50"
     depends_on:
       redis:
         condition: service_healthy
     volumes:
-      - model_cache:/root/.cache
+      - model_cache:/root/.cache   # caches yolov7 source + weights
       - media_data:/app/media
 
   # GPU worker variant (use with: docker compose --profile gpu up)
@@ -73,9 +78,9 @@ services:
     environment:
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
-      YOLO_MODEL_SIZE: yolov8m
+      YOLOV7_IMG_SIZE: "640"
       DETECTION_CONFIDENCE_THRESHOLD: "0.25"
-      CLASSIFICATION_CONFIDENCE_THRESHOLD: "0.15"
+      NMS_IOU_THRESHOLD: "0.45"
       MAX_DETECTIONS_PER_IMAGE: "50"
     depends_on:
       redis:
