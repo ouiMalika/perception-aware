@@ -6,48 +6,51 @@ Adapted from: https://github.com/georgesung/ssd_tensorflow_traffic_sign_detectio
 
 The original create_pickle.py loaded only stop signs and pedestrian-crossing
 annotations from the LISA dataset.  This module generalises that to ALL 47
-sign categories by:
+sign categories and supports both LISA directory layouts:
 
-  1. Walking every per-class subdirectory under LISA_DIR
-  2. Parsing the semicolon-delimited frameAnnotations.csv in each
-  3. Returning a unified annotation list compatible with data_prep.py
+Layout A — single merged CSV (auto-detected)
+---------------------------------------------
+lisa/
+  annotations.csv        ← one file covers all classes; semicolons OR commas
+  stop/frames/stop_1/frame000.png
+  pedestrianCrossing/frames/...
+  ...
 
-Expected LISA directory layout
--------------------------------
+The CLI auto-detects annotations.csv / allAnnotations.csv at the root.
+Image paths in the CSV are resolved relative to the lisa root, the CSV's
+own directory, or as bare filenames (flat folder) — all three are tried.
+
+Layout B — per-class subdirectories
+-------------------------------------
 lisa/
   stop/
-    frameAnnotations.csv       ← semicolon-separated, 1 header row
-    frames/
-      stop_1/
-        frame000.png
-        ...
+    frameAnnotations.csv  ← semicolon-separated, 1 header row
+    frames/stop_1/frame000.png
   pedestrianCrossing/
     frameAnnotations.csv
-    frames/
-      ...
+    frames/...
   <signClass>/
     ...
 
-frameAnnotations.csv columns (0-indexed, semicolon delimiter):
-  0  Filename          relative path from the class dir, e.g. frames/stop_1/frame0.png
-  1  Annotation tag    sign class name (should match the directory name)
+CSV column order (0-indexed, applies to both layouts):
+  0  Filename          image path (relative or absolute)
+  1  Annotation tag    sign class name matching CLASSES in settings.py
   2  Upper left X      pixel, absolute
   3  Upper left Y      pixel, absolute
   4  Lower right X     pixel, absolute
   5  Lower right Y     pixel, absolute
-  6  Origin file
-  7  Origin frame number
-  8  Origin track
-  9  Origin track frame number
+  6+ Origin metadata   (ignored)
 
 Usage
 -----
-    from dataset import load_lisa_dataset, save_pickle, load_pickle
+    from dataset import load_lisa_dataset, load_merged_csv, save_pickle, load_pickle
 
-    raw = load_lisa_dataset("./data/lisa")
+    # Auto-detect and load (works for both layouts):
+    raw = load_lisa_dataset("./data/lisa")      # per-class dirs
+    # -- or --
+    raw = load_merged_csv("./data/lisa/annotations.csv", lisa_dir="./data/lisa")
+
     save_pickle(raw, "./data/pickles/data_raw_400x260.p")
-
-    # Later:
     raw = load_pickle("./data/pickles/data_raw_400x260.p")
 """
 
@@ -216,35 +219,88 @@ def load_lisa_dataset(
     return all_annotations
 
 
+def find_merged_csv(lisa_dir: str) -> Optional[str]:
+    """Auto-detect a merged annotations CSV at the root of the LISA directory.
+
+    Checks common filenames used by different LISA releases/repacks.
+    Returns the path if found, else None.
+    """
+    candidates = [
+        "annotations.csv",
+        "allAnnotations.csv",
+        "Annotations.csv",
+        "AllAnnotations.csv",
+        "train_labels.csv",
+        "labels.csv",
+    ]
+    root = Path(lisa_dir)
+    for name in candidates:
+        p = root / name
+        if p.exists():
+            return str(p)
+    return None
+
+
+def _resolve_image_path(rel_filename: str, lisa_root: Path, csv_dir: Path) -> Optional[Path]:
+    """Try multiple strategies to find the image file on disk.
+
+    LISA releases use inconsistent path formats in their CSVs:
+      - Relative to class dir:  frames/stop_1/frame000.png
+      - Relative to lisa root:  stop/frames/stop_1/frame000.png
+      - Absolute paths
+      - Flat directory:         frame000.png
+
+    Returns the first existing path, or None.
+    """
+    candidates = [
+        lisa_root / rel_filename,           # relative to lisa root (most common)
+        csv_dir   / rel_filename,           # relative to CSV file location
+        Path(rel_filename),                 # absolute or CWD-relative
+        lisa_root / Path(rel_filename).name,# flat: just the filename
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
+
+
 def load_merged_csv(
     merged_csv: str,
     lisa_dir: str = LISA_DIR,
     verbose: bool = True,
 ) -> List[Annotation]:
-    """Parse a pre-merged allAnnotations.csv (alternative to per-class dirs).
+    """Parse a merged annotations CSV (alternative to per-class dirs).
 
-    Some LISA releases supply a single merged CSV.  The delimiter may be mixed
-    (semicolons AND commas); this function normalises it on the fly.
+    Handles the format used by the official LISA release and common repacks:
+      - Delimiter: semicolon, comma, or mixed (auto-detected and normalised)
+      - Image paths: resolved relative to lisa_dir, the CSV directory, or as
+        bare filenames in a flat folder (tries all strategies)
 
     Args:
-        merged_csv: path to the merged CSV file.
-        lisa_dir  : LISA root (used to resolve relative image paths).
-        verbose   : print statistics.
+        merged_csv: path to the merged CSV file (e.g. annotations.csv).
+        lisa_dir  : LISA root directory (used to resolve image paths).
+        verbose   : print per-class statistics.
 
     Returns:
         List of Annotation dicts.
     """
+    from io import StringIO
+
     lisa_root = Path(lisa_dir)
+    csv_dir   = Path(merged_csv).parent
     annotations: List[Annotation] = []
     unknown_classes: set = set()
+    missing_images: int = 0
+    class_counts: dict = {}
 
     with open(merged_csv, newline="", encoding="utf-8") as f:
-        # Normalise mixed semicolon/comma delimiters
-        content = f.read().replace(";", ",")
+        content = f.read()
 
-    from io import StringIO
+    # Normalise mixed semicolon/comma delimiters
+    content = content.replace(";", ",")
+
     reader = csv.reader(StringIO(content))
-    header = next(reader, None)
+    next(reader, None)  # skip header row
 
     for row in reader:
         if len(row) < 6:
@@ -266,8 +322,9 @@ def load_merged_csv(
         except (ValueError, IndexError):
             continue
 
-        img_path = lisa_root / rel_filename
-        if not img_path.exists():
+        img_path = _resolve_image_path(rel_filename, lisa_root, csv_dir)
+        if img_path is None:
+            missing_images += 1
             continue
 
         annotations.append({
@@ -278,11 +335,16 @@ def load_merged_csv(
             "img_w"     : None,
             "img_h"     : None,
         })
+        class_counts[cls_name] = class_counts.get(cls_name, 0) + 1
 
     if verbose:
-        print(f"Loaded {len(annotations)} annotations from {merged_csv}")
+        print(f"Loaded {len(annotations)} annotations from: {merged_csv}")
+        for cls, count in sorted(class_counts.items()):
+            print(f"  {cls:30s}  {count:5d}")
         if unknown_classes:
-            print(f"  Skipped unknown classes: {sorted(unknown_classes)}")
+            print(f"\n  Skipped unknown class names: {sorted(unknown_classes)}")
+        if missing_images:
+            print(f"  Skipped {missing_images} rows with unresolvable image paths")
 
     return annotations
 
@@ -376,9 +438,15 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     print(f"Loading LISA dataset from: {args.lisa_dir}")
-    if args.merged_csv:
-        raw = load_merged_csv(args.merged_csv, lisa_dir=args.lisa_dir)
+
+    # Determine source: explicit CSV > auto-detected CSV > per-class dirs
+    merged_csv_path = args.merged_csv or find_merged_csv(args.lisa_dir)
+
+    if merged_csv_path:
+        print(f"Found merged CSV: {merged_csv_path}")
+        raw = load_merged_csv(merged_csv_path, lisa_dir=args.lisa_dir)
     else:
+        print("No merged CSV found — scanning per-class subdirectories …")
         raw = load_lisa_dataset(args.lisa_dir)
 
     raw = normalise_boxes(raw)

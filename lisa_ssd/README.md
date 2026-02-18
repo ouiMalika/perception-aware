@@ -101,32 +101,39 @@ The full LISA Traffic Sign Dataset (~7.7 GB, 47 classes) requires a free
 academic registration:
 <http://cvrr-nas.ucsd.edu/LISA/lisa-traffic-sign-dataset.html>
 
-> **Note:** Third-party "Tiny LISA" repacks on Kaggle dump all images into
-> a flat folder without per-class subdirectories and are **not** compatible
-> with this loader.  Use the official release or the synthetic generator above.
+The loader supports **both** directory layouts automatically:
 
-After extracting the official dataset the layout must look like:
-
+**Layout 1 — single merged CSV** (auto-detected at the root):
 ```
-data/
-└── lisa/
-    ├── stop/
-    │   ├── frameAnnotations.csv      ← semicolon-delimited, 1 header row
-    │   └── frames/
-    │       └── stop_1/
-    │           ├── frame000.png
-    │           └── ...
-    ├── pedestrianCrossing/
-    │   ├── frameAnnotations.csv
-    │   └── frames/...
-    ├── speedLimit35/
-    │   ├── frameAnnotations.csv
-    │   └── frames/...
-    └── ... (one directory per sign class)
+data/lisa/
+├── annotations.csv       ← one file for all classes (semicolons or commas)
+├── stop/frames/stop_1/frame000.png
+├── pedestrianCrossing/frames/...
+└── ...
 ```
 
-> **Tip:** The dataset loader silently skips missing class directories, so
-> you can start training on any partial subset of the 47 classes.
+**Layout 2 — per-class subdirectories:**
+```
+data/lisa/
+├── stop/
+│   ├── frameAnnotations.csv
+│   └── frames/stop_1/frame000.png  ...
+├── pedestrianCrossing/
+│   ├── frameAnnotations.csv
+│   └── frames/...
+└── ... (one directory per sign class)
+```
+
+`dataset.py` checks for `annotations.csv` / `allAnnotations.csv` at the
+root first; if found it uses that, otherwise it falls back to scanning
+per-class directories.  Either way the command is the same:
+
+```bash
+python lisa_ssd/dataset.py --lisa_dir ./data/lisa
+```
+
+> **Tip:** The loader silently skips missing class directories / unknown
+> class names, so partial datasets work fine.
 
 ### 3. Preprocess
 
