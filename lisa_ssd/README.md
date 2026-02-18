@@ -66,30 +66,53 @@ lisa_ssd/
 
 ### 1. Install dependencies
 
+**macOS Apple Silicon (M1/M2/M3)** — `tensorflow` is not on PyPI for arm64;
+use the Apple-maintained port instead:
+
+```bash
+pip install tensorflow-macos tensorflow-metal
+pip install opencv-python numpy
+```
+
+**macOS Intel / Linux / Windows:**
+
 ```bash
 pip install -r lisa_ssd/requirements.txt
 ```
 
 ### 2. Download the LISA dataset
 
-The LISA Traffic Sign Dataset is available under an academic license from:
+The full LISA Traffic Sign Dataset (~7.7 GB) requires a free academic
+registration at:
 <http://cvrr-nas.ucsd.edu/LISA/lisa-traffic-sign-dataset.html>
 
-Extract it so the directory layout looks like:
+A **smaller "Tiny LISA"** subset (~200 MB, no registration) is available on
+Kaggle and is sufficient for quick experiments:
+<https://www.kaggle.com/datasets/mmontiel/tiny-lisa-traffic-sign-detection-dataset>
+
+After downloading, extract so the layout looks like:
 
 ```
-data/lisa/
-  stop/
-    frameAnnotations.csv
-    frames/stop_1/frame000.png  ...
-  pedestrianCrossing/
-    frameAnnotations.csv
-    frames/...
-  speedLimit35/
-    frameAnnotations.csv
-    frames/...
-  ... (one directory per sign class)
+data/
+└── lisa/
+    ├── stop/
+    │   ├── frameAnnotations.csv      ← semicolon-delimited, 1 header row
+    │   └── frames/
+    │       └── stop_1/
+    │           ├── frame000.png
+    │           └── ...
+    ├── pedestrianCrossing/
+    │   ├── frameAnnotations.csv
+    │   └── frames/...
+    ├── speedLimit35/
+    │   ├── frameAnnotations.csv
+    │   └── frames/...
+    └── ... (one directory per sign class)
 ```
+
+> **Tip:** You don't need all 47 classes to start.  The dataset loader
+> silently skips missing class directories, so you can begin with just the
+> classes you have downloaded.
 
 ### 3. Preprocess
 

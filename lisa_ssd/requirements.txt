@@ -3,12 +3,22 @@
 # Dependencies for the LISA All-Classes AlexNet-SSD traffic sign detector.
 # Adapted from: https://github.com/georgesung/ssd_tensorflow_traffic_sign_detection
 #
-# Original used TensorFlow 0.12.  This adaptation targets TF 2.x.
+# ──────────────────────────────────────────────────────────────
+# INSTALL BY PLATFORM:
 #
-# Install with:
-#   pip install -r requirements.txt
+#   macOS Apple Silicon (M1/M2/M3):
+#     pip install tensorflow-macos tensorflow-metal
+#     pip install opencv-python numpy
+#
+#   macOS Intel / Linux / Windows:
+#     pip install -r requirements.txt
+#
+#   (tensorflow-macos is the Apple-maintained arm64 port of TF;
+#    tensorflow-metal adds GPU acceleration via the Metal API)
+# ──────────────────────────────────────────────────────────────
 
-# Core ML framework (TF 2.x replaces TF 0.12 from original)
+# Core ML framework — Linux/Intel-Mac/Windows
+# Apple Silicon users: replace with  tensorflow-macos + tensorflow-metal
 tensorflow>=2.12.0
 
 # Computer vision
@@ -16,6 +26,3 @@ opencv-python>=4.8.0
 
 # Numerical computing
 numpy>=1.24.0
-
-# For Python < 3.11 — type hints used in annotations
-# (no additional install needed for 3.11+)
