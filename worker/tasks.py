@@ -171,7 +171,7 @@ def detect_signs_video(self, video_path: str, options: dict | None = None):
     Returns:
         dict with tracked signs and per-frame detections.
     """
-    from video_processor import detect_signs_in_video
+    from video_processor import detect_signs_in_video, generate_annotated_video
 
     options = options or {}
 
@@ -208,6 +208,28 @@ def detect_signs_video(self, video_path: str, options: dict | None = None):
 
     result_dict = result.to_dict()
     result_dict["processing_time_s"] = round(elapsed, 2)
+
+    # Generate annotated video with bounding boxes
+    annotated_path = None
+    if result.per_frame_detections:
+        self.update_state(
+            state="PROGRESS",
+            meta={"status": "Generating annotated video with bounding boxes..."},
+        )
+        base, ext = os.path.splitext(video_path)
+        annotated_path = f"{base}_annotated.mp4"
+        try:
+            generate_annotated_video(
+                video_path=video_path,
+                frame_detections=result.per_frame_detections,
+                output_path=annotated_path,
+                progress_callback=progress_callback,
+            )
+            result_dict["annotated_video_path"] = annotated_path
+            logger.info("Annotated video saved: %s", annotated_path)
+        except Exception as exc:
+            logger.warning("Failed to generate annotated video: %s", exc)
+            result_dict["annotated_video_path"] = None
 
     return {
         "status": "completed",

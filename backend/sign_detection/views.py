@@ -16,6 +16,7 @@ import json
 import uuid
 
 from celery.result import AsyncResult
+from django.conf import settings
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from rest_framework import generics, permissions, status
@@ -229,7 +230,22 @@ class JobStatusView(APIView):
             elif result.state == "SUCCESS":
                 job.status = "completed"
                 job.result = result.result
-                job.save(update_fields=["status", "result"])
+                save_fields = ["status", "result"]
+                # For video jobs, link the annotated output video
+                if job.job_type == "video":
+                    annotated_path = (result.result or {}).get("result", {}).get("annotated_video_path")
+                    if annotated_path:
+                        # Convert absolute worker path to a relative media path
+                        # Worker saves to /app/media/videos/..., we need videos/...
+                        import os
+                        media_root = str(settings.MEDIA_ROOT)
+                        if annotated_path.startswith(media_root):
+                            rel_path = annotated_path[len(media_root):].lstrip("/")
+                        else:
+                            rel_path = os.path.basename(annotated_path)
+                        job.output_video.name = rel_path
+                        save_fields.append("output_video")
+                job.save(update_fields=save_fields)
                 if job.job_type == "video":
                     _persist_tracked_signs(job)
                 else:

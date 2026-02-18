@@ -34,6 +34,7 @@ class DetectionJob(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
     image_urls = models.JSONField(default=list, help_text="Input image URLs")
     video_file = models.FileField(upload_to="videos/", null=True, blank=True, help_text="Uploaded video file")
+    output_video = models.FileField(upload_to="videos/", null=True, blank=True, help_text="Annotated output video with bounding boxes")
     result = models.JSONField(null=True, blank=True, help_text="Detection results JSON")
     error_message = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)

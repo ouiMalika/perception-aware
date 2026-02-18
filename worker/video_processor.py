@@ -16,6 +16,7 @@ import numpy as np
 from PIL import Image
 
 from detector import BoundingBox, SignDetection, detect_signs_in_image
+from visualizer import draw_detections
 
 logger = logging.getLogger(__name__)
 
@@ -351,3 +352,96 @@ def detect_signs_in_video(
         tracked_signs=tracked,
         per_frame_detections=all_frame_detections,
     )
+
+
+# ---------------------------------------------------------------------------
+# Annotated video generation
+# ---------------------------------------------------------------------------
+
+
+def generate_annotated_video(
+    video_path: str,
+    frame_detections: list[FrameDetection],
+    output_path: str,
+    progress_callback=None,
+) -> str:
+    """
+    Re-read the original video and write an annotated copy with bounding boxes.
+
+    Draws detections on each frame where they were found, writing all
+    original frames (not just sampled ones) so the output plays smoothly.
+
+    Args:
+        video_path: Path to the original video.
+        frame_detections: Per-frame detections from the detection pipeline.
+        output_path: Where to write the annotated video (mp4).
+        progress_callback: Optional callable(current, total, message).
+
+    Returns:
+        The output_path that was written.
+    """
+    # Index detections by frame number for fast lookup
+    detections_by_frame: dict[int, list[SignDetection]] = {}
+    for fd in frame_detections:
+        detections_by_frame.setdefault(fd.frame_number, []).append(fd.detection)
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Cannot open video: {video_path}")
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    # Use mp4v codec for broad compatibility
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+
+    if not writer.isOpened():
+        cap.release()
+        raise ValueError(f"Cannot create video writer for: {output_path}")
+
+    # For frames between sampled keyframes, carry forward the most recent
+    # detections so bounding boxes persist visually.
+    sampled_frames = sorted(detections_by_frame.keys())
+    active_detections: list[SignDetection] = []
+
+    frame_num = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        if frame_num in detections_by_frame:
+            active_detections = detections_by_frame[frame_num]
+        elif sampled_frames:
+            # Clear if we've passed far beyond the last keyframe
+            next_keyframes = [f for f in sampled_frames if f > frame_num]
+            if next_keyframes:
+                # We're between keyframes — keep showing previous detections
+                pass
+            elif frame_num > sampled_frames[-1] + int(fps * 0.5):
+                active_detections = []
+
+        if active_detections:
+            # Convert BGR to RGB for PIL, draw, convert back
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            pil_image = Image.fromarray(rgb)
+            annotated = draw_detections(pil_image, active_detections)
+            frame = cv2.cvtColor(np.array(annotated), cv2.COLOR_RGB2BGR)
+
+        writer.write(frame)
+        frame_num += 1
+
+        if progress_callback and frame_num % 100 == 0:
+            progress_callback(
+                frame_num, total_frames,
+                f"Rendering annotated video: frame {frame_num}/{total_frames}",
+            )
+
+    cap.release()
+    writer.release()
+    logger.info("Annotated video saved to %s (%d frames)", output_path, frame_num)
+    return output_path

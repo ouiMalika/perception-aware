@@ -153,13 +153,13 @@ class DetectionJobSerializer(serializers.ModelSerializer):
         model = DetectionJob
         fields = [
             "id", "job_id", "job_type", "status", "image_urls",
-            "video_file", "result", "error_message",
+            "video_file", "output_video", "result", "error_message",
             "created_at", "updated_at",
             "detected_signs", "tracked_signs",
         ]
         read_only_fields = [
             "id", "job_id", "job_type", "status", "result",
-            "error_message", "created_at", "updated_at",
+            "output_video", "error_message", "created_at", "updated_at",
             "detected_signs", "tracked_signs",
         ]
 
