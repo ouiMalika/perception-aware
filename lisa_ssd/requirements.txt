@@ -1,0 +1,21 @@
+# lisa_ssd/requirements.txt
+# =========================
+# Dependencies for the LISA All-Classes AlexNet-SSD traffic sign detector.
+# Adapted from: https://github.com/georgesung/ssd_tensorflow_traffic_sign_detection
+#
+# Original used TensorFlow 0.12.  This adaptation targets TF 2.x.
+#
+# Install with:
+#   pip install -r requirements.txt
+
+# Core ML framework (TF 2.x replaces TF 0.12 from original)
+tensorflow>=2.12.0
+
+# Computer vision
+opencv-python>=4.8.0
+
+# Numerical computing
+numpy>=1.24.0
+
+# For Python < 3.11 — type hints used in annotations
+# (no additional install needed for 3.11+)
